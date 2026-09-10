@@ -1,13 +1,12 @@
 #!/bin/bash
 
 # ======================================================
-#  Docker Auto-Install Script
+#  GitHub Repo Clone Script
 #  Features:
-#  - Interactive: Asks user for location (Iran/Global)
-#  - Auto-detect OS (Ubuntu/Debian)
-#  - Install Docker & Docker Compose (latest)
-#  - Configure Iranian mirrors if selected
-#  - Idempotent: Safe to run multiple times
+#  - Install Git & dependencies
+#  - Clone repo to /opt
+#  - Interactive & guided
+#  - Supports both public and private repos
 # ======================================================
 
 set -e
@@ -50,184 +49,159 @@ fi
 
 log_success "Detected OS: $OS $VER"
 
-# ---------- Ask User: Iran or Global? ----------
-echo ""
-echo -e "${BOLD}======================================================${NC}"
-echo -e "${BOLD}  Server Location${NC}"
-echo -e "${BOLD}======================================================${NC}"
-echo ""
-echo "Are you installing on a server INSIDE Iran or OUTSIDE Iran?"
-echo ""
-echo "  1) Iran (use Iranian mirrors for faster & unrestricted access)"
-echo "  2) Global (use official Docker repositories)"
-echo ""
-read -p "Enter choice [1 or 2]: " LOCATION
-echo ""
-
-case $LOCATION in
-    1)
-        SERVER_LOCATION="iran"
-        log_info "Selected: Iran (Iranian mirrors will be configured)"
-        ;;
-    2)
-        SERVER_LOCATION="global"
-        log_info "Selected: Global (Official Docker repos)"
-        ;;
-    *)
-        log_error "Invalid choice. Please run again and select 1 or 2."
-        exit 1
-        ;;
-esac
-
-# ---------- Install Dependencies ----------
-log_info "Installing prerequisites..."
+# ---------- Install Git & Dependencies ----------
+log_info "Installing Git and dependencies..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq ca-certificates curl gnupg lsb-release apt-transport-https software-properties-common > /dev/null 2>&1
-log_success "Prerequisites installed."
 
-# ---------- Remove Old Docker Versions ----------
-log_info "Removing any old Docker versions..."
-apt-get remove -y -qq docker docker-engine docker.io containerd runc docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-compose > /dev/null 2>&1 || true
-apt-get autoremove -y -qq > /dev/null 2>&1 || true
-log_success "Old versions removed."
-
-# ---------- Install Docker ----------
-if [ "$SERVER_LOCATION" = "global" ]; then
-    # ---------- Global: Official Docker Repo ----------
-    log_info "Adding official Docker GPG key and repository..."
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/$OS/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null
-    chmod a+r /etc/apt/keyrings/docker.gpg
-
-    echo \
-      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$OS \
-      $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-      tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-    apt-get update -qq
-    log_info "Installing Docker Engine, CLI, containerd, Buildx, and Compose plugin..."
-    apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin > /dev/null 2>&1
-    log_success "Docker installed from official repositories."
-
+# Check if git is already installed
+if ! command -v git > /dev/null 2>&1; then
+    apt-get install -y -qq git > /dev/null 2>&1
+    log_success "Git installed."
 else
-    # ---------- Iran: Use Iranian Mirror for Docker Packages ----------
-    log_info "Configuring Docker installation from Iranian mirror..."
-
-    # Use the official Docker GPG key (can be fetched via mirror if needed, but GPG key is not geo-blocked usually)
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/$OS/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null || \
-      curl -fsSL https://mirror.arvancloud.ir/docker-ce/linux/$OS/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null
-    chmod a+r /etc/apt/keyrings/docker.gpg
-
-    # Use an Iranian mirror for Docker packages
-    # ArvanCloud is a popular and reliable mirror. You can change this to another mirror if you prefer.
-    DOCKER_MIRROR="https://mirror.arvancloud.ir/docker-ce/linux/$OS"
-    echo \
-      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] $DOCKER_MIRROR \
-      $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-      tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-    apt-get update -qq
-    log_info "Installing Docker Engine, CLI, containerd, Buildx, and Compose plugin from mirror..."
-    apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin > /dev/null 2>&1
-    log_success "Docker installed from Iranian mirror."
+    log_success "Git is already installed."
 fi
 
-# ---------- Configure Docker Daemon (Mirrors & Log Rotation) ----------
-log_info "Configuring Docker daemon..."
+# Install additional useful tools
+log_info "Installing additional tools (curl, wget, unzip)..."
+apt-get install -y -qq curl wget unzip ca-certificates > /dev/null 2>&1
+log_success "Additional tools installed."
 
-# Backup existing daemon.json if it exists
-if [ -f /etc/docker/daemon.json ]; then
-    cp /etc/docker/daemon.json /etc/docker/daemon.json.backup.$(date +%s)
-    log_info "Backed up existing daemon.json"
-fi
-
-# Create daemon.json
-if [ "$SERVER_LOCATION" = "iran" ]; then
-    # Iranian registry mirrors (popular and reliable ones)
-    cat > /etc/docker/daemon.json <<EOF
-{
-  "registry-mirrors": [
-    "https://docker.arvancloud.ir",
-    "https://docker.iranserver.com",
-    "https://docker.kernel.ir",
-    "https://focker.ir"
-  ],
-  "log-driver": "json-file",
-  "log-opts": {
-    "max-size": "10m",
-    "max-file": "3"
-  }
-}
-EOF
-    log_success "Configured Iranian Docker registry mirrors."
-else
-    # Global: Only log rotation, no mirror needed
-    cat > /etc/docker/daemon.json <<EOF
-{
-  "log-driver": "json-file",
-  "log-opts": {
-    "max-size": "10m",
-    "max-file": "3"
-  }
-}
-EOF
-    log_success "Configured Docker log rotation."
-fi
-
-# ---------- Restart Docker ----------
-log_info "Restarting Docker service..."
-systemctl daemon-reload
-systemctl enable docker > /dev/null 2>&1
-systemctl restart docker
-sleep 2
-
-# ---------- Verify Installation ----------
-log_info "Verifying installation..."
-if docker --version > /dev/null 2>&1; then
-    DOCKER_VER=$(docker --version)
-    log_success "Docker installed: $DOCKER_VER"
-else
-    log_error "Docker installation failed!"
-    exit 1
-fi
-
-if docker compose version > /dev/null 2>&1; then
-    COMPOSE_VER=$(docker compose version)
-    log_success "Docker Compose installed: $COMPOSE_VER"
-else
-    log_error "Docker Compose installation failed!"
-    exit 1
-fi
-
-# Test Docker
-log_info "Running hello-world test..."
-if docker run --rm hello-world > /dev/null 2>&1; then
-    log_success "Docker is working correctly!"
-else
-    log_warn "hello-world test failed. This might be due to network issues."
-fi
-
-# ---------- Show Status ----------
+# ---------- Get User Information ----------
 echo ""
 echo -e "${BOLD}======================================================${NC}"
-echo -e "${GREEN}${BOLD}  Installation Complete!${NC}"
+echo -e "${BOLD}  GitHub Repository Clone${NC}"
 echo -e "${BOLD}======================================================${NC}"
 echo ""
-echo "Docker version: $(docker --version)"
-echo "Compose version: $(docker compose version)"
+
+# Get GitHub username
+read -p "Enter your GitHub username: " github_user
+
+# Get repository name
+read -p "Enter repository name (e.g., my-project): " repo_name
+
+# Get branch (default: main)
+read -p "Enter branch name (default: main): " branch_name
+branch_name=${branch_name:-main}
+
+# Ask if repository is private
+read -p "Is the repository private? (y/n): " -n 1 -r
 echo ""
-echo "Daemon configuration (/etc/docker/daemon.json):"
-cat /etc/docker/daemon.json
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    is_private=true
+    log_info "Private repository selected."
+else
+    is_private=false
+    log_info "Public repository selected."
+fi
+
+# ---------- Prepare /opt Directory ----------
+TARGET_DIR="/opt/$repo_name"
+
+if [ -d "$TARGET_DIR" ]; then
+    log_warn "Directory $TARGET_DIR already exists."
+    read -p "Do you want to remove it and clone fresh? (y/n): " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        rm -rf "$TARGET_DIR"
+        log_info "Removed existing directory."
+    else
+        log_error "Aborted. Directory already exists."
+        exit 1
+    fi
+fi
+
+# ---------- Clone Repository ----------
 echo ""
-echo "Docker service status:"
-systemctl is-active docker && echo "  -> active (running)" || echo "  -> not running"
+log_info "Cloning repository..."
+
+# Construct repo URL
+if [ "$is_private" = true ]; then
+    # For private repos, use token authentication
+    echo ""
+    echo -e "${YELLOW}For private repositories, you need a Personal Access Token (PAT).${NC}"
+    echo ""
+    echo "How to create a token:"
+    echo "  1. Go to: https://github.com/settings/tokens"
+    echo "  2. Click 'Generate new token (classic)'"
+    echo "  3. Give it a name (e.g., VPS Clone)"
+    echo "  4. Check 'repo' scope"
+    echo "  5. Click 'Generate token' and copy it"
+    echo ""
+    read -p "Enter your Personal Access Token: " github_token
+    
+    # Use token in URL
+    REPO_URL="https://${github_user}:${github_token}@github.com/${github_user}/${repo_name}.git"
+    DISPLAY_URL="https://github.com/${github_user}/${repo_name}.git"
+else
+    # Public repo
+    REPO_URL="https://github.com/${github_user}/${repo_name}.git"
+    DISPLAY_URL="$REPO_URL"
+fi
+
+# Clone the repository
+echo ""
+log_info "Cloning from: $DISPLAY_URL"
+log_info "Target directory: $TARGET_DIR"
+log_info "Branch: $branch_name"
+
+if git clone -b "$branch_name" "$REPO_URL" "$TARGET_DIR" 2>/dev/null; then
+    log_success "Repository cloned successfully!"
+else
+    # Try without specifying branch
+    log_warn "Branch '$branch_name' not found. Trying default branch..."
+    if git clone "$REPO_URL" "$TARGET_DIR" 2>/dev/null; then
+        log_success "Repository cloned successfully (default branch)!"
+    else
+        log_error "Failed to clone repository."
+        log_warn "Please check:"
+        echo "  - Repository name and username are correct"
+        echo "  - For private repos, token has 'repo' scope"
+        echo "  - For private repos, token is valid and not expired"
+        exit 1
+    fi
+fi
+
+# ---------- Post-Clone Setup ----------
+cd "$TARGET_DIR"
+
+# Show repository info
+echo ""
+log_success "Repository cloned to: $TARGET_DIR"
+echo ""
+echo -e "${BOLD}Repository Information:${NC}"
+echo "  - Remote URL: $(git remote get-url origin 2>/dev/null | sed 's/:[^@]*@/:***@/')"
+echo "  - Current branch: $(git branch --show-current 2>/dev/null)"
+echo "  - Latest commit: $(git log -1 --pretty=format:'%h - %s (%an, %ar)' 2>/dev/null)"
+
+# Check for docker-compose.yml
+if [ -f "docker-compose.yml" ] || [ -f "compose.yml" ]; then
+    echo ""
+    log_info "Docker Compose file detected."
+    read -p "Do you want to start the project with Docker Compose? (y/n): " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if command -v docker > /dev/null 2>&1; then
+            log_info "Starting services..."
+            docker compose up -d 2>/dev/null || docker-compose up -d
+            log_success "Services started!"
+        else
+            log_warn "Docker is not installed. Please install Docker first."
+        fi
+    fi
+fi
+
+# Show final message
+echo ""
+echo -e "${BOLD}======================================================${NC}"
+echo -e "${GREEN}${BOLD}  Setup Complete!${NC}"
+echo -e "${BOLD}======================================================${NC}"
+echo ""
+echo "Project location: $TARGET_DIR"
 echo ""
 echo -e "${CYAN}Useful commands:${NC}"
-echo "  docker ps                # List running containers"
-echo "  docker compose up -d     # Start services from docker-compose.yml"
-echo "  docker system df         # Check Docker disk usage"
-echo "  docker system prune -a   # Clean unused data"
+echo "  cd $TARGET_DIR           # Go to project"
+echo "  git pull origin $branch_name    # Pull latest changes"
+echo "  git status               # Check status"
 echo ""
-log_success "All done! Enjoy Docker. 🐳"
+log_success "All done! 🚀"
