@@ -58,10 +58,10 @@ clone-repo.sh	Clones a GitHub repo to /opt with dependencies	Deploy a project fr
 ⚡ Quick Start
 Docker Installation
 bash
-bash <(curl -fsSL https://raw.githubusercontent.com/alpha330/initial_ubuntu_server/main/install-docker.sh)
+bash <(curl -fsSL https://github.com/alpha330/intial_ubuntu_server/blob/main/install-docker.sh)
 Clone a GitHub Repository
 bash
-bash <(curl -fsSL https://raw.githubusercontent.com/alpha330/initial_ubuntu_server/main/clone-repo.sh)
+bash <(curl -fsSL https://github.com/alpha330/intial_ubuntu_server/blob/main/clone-repo.sh)
 Note: Replace YOUR_USERNAME/YOUR_REPO with your actual GitHub repository path.
 
 📖 Detailed Usage
