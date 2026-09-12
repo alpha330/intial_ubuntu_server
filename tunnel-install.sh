@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # ======================================================
-#  SoftEther Client + OpenVPN Installer (ARM64 - GitHub)
+#  SoftEther Client + OpenVPN Installer (Auto-Arch)
 #  Features:
-#  - Downloads SoftEther vpnclient from GitHub Releases
-#  - Auto-detects ARM64 architecture
+#  - Auto-detects architecture (amd64 / arm64)
+#  - Downloads correct SoftEther client binary
 #  - Installs OpenVPN and Network Manager plugin
-#  - Compiles SoftEther client (requires make)
+#  - Compiles SoftEther client
 #  - Interactive & guided
 # ======================================================
 
@@ -49,16 +49,22 @@ fi
 ARCH=$(dpkg --print-architecture)
 log_success "Detected OS: $OS $VER ($ARCH)"
 
-# Check if architecture is ARM64
-if [ "$ARCH" != "arm64" ]; then
-    log_warn "This script is optimized for ARM64. Detected: $ARCH"
-    log_warn "The download URL will use 'linux-arm64-64bit'."
-    read -p "Continue anyway? (y/n): " -n 1 -r
-    echo ""
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
+# ---------- Select Correct Download URL ----------
+SOFTETHER_VERSION="v4.44-9807-rtm"
+SOFTETHER_DATE="2025.04.16"
+
+# Map dpkg architecture to SoftEther's naming convention
+if [ "$ARCH" = "amd64" ]; then
+    SOFTETHER_ARCH="linux-x64-64bit"
+elif [ "$ARCH" = "arm64" ]; then
+    SOFTETHER_ARCH="linux-arm64-64bit"
+else
+    log_error "Unsupported architecture: $ARCH"
+    log_warn "Supported: amd64 (x86_64) and arm64 (aarch64)"
+    exit 1
 fi
+
+log_info "Using SoftEther binary for: $SOFTETHER_ARCH"
 
 # ---------- Install Dependencies ----------
 log_info "Installing prerequisites..."
@@ -82,64 +88,60 @@ apt-get install -y -qq \
 
 log_success "Prerequisites installed."
 
-# ---------- Install SoftEther Client from GitHub ----------
-log_info "Installing SoftEther VPN Client (ARM64)..."
+# ---------- Install SoftEther Client ----------
+log_info "Installing SoftEther VPN Client ($SOFTETHER_ARCH)..."
 
 # Check if already installed
 if [ -f /usr/local/vpnclient/vpnclient ]; then
     log_warn "SoftEther VPN Client is already installed at /usr/local/vpnclient/"
 else
-    # Use the version from the user's provided link context
-    SOFTETHER_VERSION="v4.44-9807-rtm"
-    SOFTETHER_DATE="2025.04.16"
-    
-    # Construct the GitHub download URL for vpnclient (ARM64)
-    # Format: https://github.com/SoftEtherVPN/SoftEtherVPN_Stable/releases/download/{VERSION}/softether-vpnclient-{VERSION}-{DATE}-linux-arm64-64bit.tar.gz
-    SOFTETHER_URL="https://github.com/SoftEtherVPN/SoftEtherVPN_Stable/releases/download/${SOFTETHER_VERSION}/softether-vpnclient-${SOFTETHER_VERSION}-${SOFTETHER_DATE}-linux-arm64-64bit.tar.gz"
-    
+    # Construct the correct GitHub download URL
+    SOFTETHER_URL="https://github.com/SoftEtherVPN/SoftEtherVPN_Stable/releases/download/${SOFTETHER_VERSION}/softether-vpnclient-${SOFTETHER_VERSION}-${SOFTETHER_DATE}-${SOFTETHER_ARCH}.tar.gz"
+
     TMP_DIR=$(mktemp -d)
     cd "$TMP_DIR"
-    
+
     log_info "Downloading from: $SOFTETHER_URL"
-    log_info "Please wait... (file size may be ~5MB)"
-    
+    log_info "Please wait... (file size may be ~5-8MB)"
+
     if wget -q --show-progress "$SOFTETHER_URL" -O softether-client.tar.gz; then
         log_success "Downloaded successfully."
     else
         log_error "Failed to download SoftEther Client from GitHub."
-        log_warn "Possible reasons:"
-        echo "  1. The URL format has changed. Check the Releases page manually:"
-        echo "     https://github.com/SoftEtherVPN/SoftEtherVPN_Stable/releases"
-        echo "  2. Network restrictions (GitHub may be slow/blocked)."
-        echo "  3. The exact filename has changed."
+        log_warn "Check the Releases page manually:"
+        echo "  https://github.com/SoftEtherVPN/SoftEtherVPN_Stable/releases"
         cd /
         rm -rf "$TMP_DIR"
         exit 1
     fi
-    
+
     # Extract
     log_info "Extracting archive..."
     tar xzf softether-client.tar.gz
     cd vpnclient
-    
+
     # Compile (SoftEther requires "make" to accept license)
     log_info "Compiling SoftEther Client (accepting license automatically)..."
-    echo "1" | make > /dev/null 2>&1
     
+    # The license prompt expects "1" to accept
+    echo "1" | make > /dev/null 2>&1
+
     if [ ! -f ./vpnclient ]; then
         log_error "Compilation failed. The vpnclient binary was not created."
+        log_warn "Check that all build dependencies are installed:"
+        echo "  sudo apt install build-essential libssl-dev libreadline-dev libncurses-dev zlib1g-dev"
         cd /
         rm -rf "$TMP_DIR"
         exit 1
     fi
-    
+
     # Move to /usr/local
     log_info "Installing to /usr/local/vpnclient/..."
     mkdir -p /usr/local/vpnclient
     cp -r ./* /usr/local/vpnclient/ 2>/dev/null || true
     cd /
     rm -rf "$TMP_DIR"
-    
+
     if [ -f /usr/local/vpnclient/vpnclient ]; then
         log_success "SoftEther Client installed to /usr/local/vpnclient/"
     else
