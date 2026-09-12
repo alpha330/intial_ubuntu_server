@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # ======================================================
-#  SoftEther Client + OpenVPN Installer (Auto-Arch)
+#  VPN Client Installer (SoftEther + OpenVPN)
 #  Features:
-#  - Auto-detects architecture (amd64 / arm64)
-#  - Downloads correct SoftEther client binary
+#  - Auto-detects architecture (amd64/arm64)
+#  - Installs SoftEther VPN Client from GitHub
 #  - Installs OpenVPN and Network Manager plugin
-#  - Compiles SoftEther client
+#  - Creates systemd service for SoftEther
 #  - Interactive & guided
 # ======================================================
 
@@ -19,7 +19,6 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# ---------- Functions ----------
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
@@ -53,14 +52,16 @@ log_success "Detected OS: $OS $VER ($ARCH)"
 SOFTETHER_VERSION="v4.44-9807-rtm"
 SOFTETHER_DATE="2025.04.16"
 
-# Map dpkg architecture to SoftEther's naming convention
 if [ "$ARCH" = "amd64" ]; then
     SOFTETHER_ARCH="linux-x64-64bit"
 elif [ "$ARCH" = "arm64" ]; then
     SOFTETHER_ARCH="linux-arm64-64bit"
+elif [ "$ARCH" = "i386" ]; then
+    SOFTETHER_ARCH="linux-x86-32bit"
+elif [ "$ARCH" = "armhf" ]; then
+    SOFTETHER_ARCH="linux-arm-32bit"
 else
     log_error "Unsupported architecture: $ARCH"
-    log_warn "Supported: amd64 (x86_64) and arm64 (aarch64)"
     exit 1
 fi
 
@@ -91,51 +92,38 @@ log_success "Prerequisites installed."
 # ---------- Install SoftEther Client ----------
 log_info "Installing SoftEther VPN Client ($SOFTETHER_ARCH)..."
 
-# Check if already installed
 if [ -f /usr/local/vpnclient/vpnclient ]; then
     log_warn "SoftEther VPN Client is already installed at /usr/local/vpnclient/"
 else
-    # Construct the correct GitHub download URL
     SOFTETHER_URL="https://github.com/SoftEtherVPN/SoftEtherVPN_Stable/releases/download/${SOFTETHER_VERSION}/softether-vpnclient-${SOFTETHER_VERSION}-${SOFTETHER_DATE}-${SOFTETHER_ARCH}.tar.gz"
 
     TMP_DIR=$(mktemp -d)
     cd "$TMP_DIR"
 
     log_info "Downloading from: $SOFTETHER_URL"
-    log_info "Please wait... (file size may be ~5-8MB)"
-
     if wget -q --show-progress "$SOFTETHER_URL" -O softether-client.tar.gz; then
         log_success "Downloaded successfully."
     else
         log_error "Failed to download SoftEther Client from GitHub."
-        log_warn "Check the Releases page manually:"
-        echo "  https://github.com/SoftEtherVPN/SoftEtherVPN_Stable/releases"
         cd /
         rm -rf "$TMP_DIR"
         exit 1
     fi
 
-    # Extract
     log_info "Extracting archive..."
     tar xzf softether-client.tar.gz
     cd vpnclient
 
-    # Compile (SoftEther requires "make" to accept license)
     log_info "Compiling SoftEther Client (accepting license automatically)..."
-    
-    # The license prompt expects "1" to accept
     echo "1" | make > /dev/null 2>&1
 
     if [ ! -f ./vpnclient ]; then
         log_error "Compilation failed. The vpnclient binary was not created."
-        log_warn "Check that all build dependencies are installed:"
-        echo "  sudo apt install build-essential libssl-dev libreadline-dev libncurses-dev zlib1g-dev"
         cd /
         rm -rf "$TMP_DIR"
         exit 1
     fi
 
-    # Move to /usr/local
     log_info "Installing to /usr/local/vpnclient/..."
     mkdir -p /usr/local/vpnclient
     cp -r ./* /usr/local/vpnclient/ 2>/dev/null || true
@@ -201,13 +189,12 @@ echo "2. Enter the management console:"
 echo "   cd /usr/local/vpnclient"
 echo "   sudo ./vpncmd"
 echo ""
-echo "3. In vpncmd, select [1] VPN Client, then press Enter:"
-echo "   - AccountCreate: Create a new connection account"
-echo "     Example: AccountCreate MyVPN /SERVER:vpn.example.com:443 /HUB:VPN"
-echo "   - AccountPasswordSet: Set the password"
-echo "     Example: AccountPasswordSet MyVPN /PASSWORD:your_pass /TYPE:standard"
+echo "3. In vpncmd, select [2] VPN Client, then press Enter:"
+echo "   - AccountImport: Import your .vpn file"
+echo "     Example: AccountImport"
+echo "     (then enter the full path to your .vpn file)"
 echo "   - AccountConnect: Connect to the VPN"
-echo "     Example: AccountConnect MyVPN"
+echo "     Example: AccountConnect \"DEFAULT - ali_desktop\""
 echo "   - AccountStatusGet: Check connection status"
 echo ""
 echo -e "${YELLOW}Configuration files location:${NC}"
@@ -228,9 +215,6 @@ echo "   sudo openvpn --config /etc/openvpn/conf/your-config.ovpn --daemon"
 echo ""
 echo "Or use Network Manager GUI:"
 echo "   Settings -> Network -> VPN -> '+' -> Import from file..."
-echo ""
-echo -e "${YELLOW}Network Manager profiles are stored in:${NC}"
-echo "   /etc/NetworkManager/system-connections/"
 echo ""
 
 echo -e "${BOLD}======================================================${NC}"
