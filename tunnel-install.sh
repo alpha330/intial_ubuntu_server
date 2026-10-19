@@ -84,8 +84,7 @@ apt-get install -y -qq \
   libncurses-dev \
   zlib1g-dev \
   openvpn \
-  network-manager-openvpn \
-  network-manager-openvpn-gnome > /dev/null 2>&1
+  network-manager-openvpn > /dev/null 2>&1
 
 log_success "Prerequisites installed."
 
@@ -103,6 +102,29 @@ else
     log_info "Downloading from: $SOFTETHER_URL"
     if wget -q --show-progress "$SOFTETHER_URL" -O softether-client.tar.gz; then
         log_success "Downloaded successfully."
+        
+        # Verify checksum
+        EXPECTED_SHA256=""
+        if [ "$ARCH" = "amd64" ]; then
+            EXPECTED_SHA256="ec18be1da49dfe6f4e05dfded46206de20a353055de0338a921eaf9a8a7c6fc6"
+        elif [ "$ARCH" = "arm64" ]; then
+            EXPECTED_SHA256="8ba172940e25eef719448cccd3b0b6aa47355200b5f44f086b064f7331b6ee56"
+        fi
+        
+        if [ -n "$EXPECTED_SHA256" ]; then
+            ACTUAL_SHA256=$(sha256sum softether-client.tar.gz | awk '{print $1}')
+            if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
+                log_error "Checksum verification failed!"
+                log_error "Expected: $EXPECTED_SHA256"
+                log_error "Got:      $ACTUAL_SHA256"
+                cd /
+                rm -rf "$TMP_DIR"
+                exit 1
+            fi
+            log_success "Checksum verified."
+        else
+            log_warn "No checksum available for architecture $ARCH. Skipping verification."
+        fi
     else
         log_error "Failed to download SoftEther Client from GitHub."
         cd /

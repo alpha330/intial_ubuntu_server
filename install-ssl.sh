@@ -50,6 +50,15 @@ fi
 
 log_success "Detected OS: $OS $VER"
 
+# Basic version check
+if [[ "$OS" == "ubuntu" && "${VER%%.*}" -lt 20 ]]; then
+    log_error "Ubuntu $VER is too old. Please use 20.04 or newer."
+    exit 1
+elif [[ "$OS" == "debian" && "${VER%%.*}" -lt 11 ]]; then
+    log_error "Debian $VER is too old. Please use 11 or newer."
+    exit 1
+fi
+
 # ---------- Install Certbot (if missing) ----------
 echo ""
 log_info "Checking Certbot installation..."
@@ -108,80 +117,6 @@ if [ -z "$EMAIL" ]; then
     exit 1
 fi
 
-# ---------- Check Port 80 ----------
-echo ""
-log_info "Checking port 80 availability..."
-
-# Find process using port 80
-PORT_80_PROCESS=""
-if command -v ss > /dev/null 2>&1; then
-    PORT_80_PROCESS=$(ss -tlnp | grep ':80 ' | head -1)
-elif command -v netstat > /dev/null 2>&1; then
-    PORT_80_PROCESS=$(netstat -tlnp | grep ':80 ' | head -1)
-elif command -v lsof > /dev/null 2>&1; then
-    PORT_80_PROCESS=$(lsof -i :80 2>/dev/null | grep LISTEN | head -1)
-fi
-
-if [ -n "$PORT_80_PROCESS" ]; then
-    log_warn "Port 80 is already in use!"
-    echo ""
-    echo -e "${YELLOW}Process occupying port 80:${NC}"
-    echo "  $PORT_80_PROCESS"
-    echo ""
-    
-    read -p "Do you want to stop this service temporarily? (y/n): " -n 1 -r
-    echo ""
-    
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        # Extract service name from process
-        SERVICE_NAME=""
-        
-        # Try to identify the service
-        if echo "$PORT_80_PROCESS" | grep -q "nginx"; then
-            SERVICE_NAME="nginx"
-        elif echo "$PORT_80_PROCESS" | grep -q "apache2"; then
-            SERVICE_NAME="apache2"
-        elif echo "$PORT_80_PROCESS" | grep -q "httpd"; then
-            SERVICE_NAME="httpd"
-        elif echo "$PORT_80_PROCESS" | grep -q "docker"; then
-            log_warn "Docker is using port 80. You may need to stop the container manually."
-            read -p "Enter container name/ID to stop (or leave empty): " DOCKER_CONTAINER
-            if [ -n "$DOCKER_CONTAINER" ]; then
-                docker stop "$DOCKER_CONTAINER" 2>/dev/null
-                log_success "Docker container stopped."
-            fi
-        fi
-        
-        if [ -n "$SERVICE_NAME" ]; then
-            log_info "Stopping $SERVICE_NAME..."
-            systemctl stop "$SERVICE_NAME" 2>/dev/null
-            sleep 2
-            log_success "$SERVICE_NAME stopped."
-            echo ""
-            log_warn "Remember to restart $SERVICE_NAME after SSL setup!"
-        fi
-        
-        # Re-check port
-        sleep 1
-        if command -v ss > /dev/null 2>&1; then
-            if ss -tlnp | grep -q ':80 '; then
-                log_error "Port 80 is still in use. Please stop the service manually."
-                exit 1
-            fi
-        fi
-        log_success "Port 80 is now available."
-    else
-        log_warn "Port 80 is in use. Certbot may fail."
-        read -p "Continue anyway? (y/n): " -n 1 -r
-        echo ""
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 1
-        fi
-    fi
-else
-    log_success "Port 80 is available."
-fi
-
 # ---------- Ask for Validation Method ----------
 echo ""
 echo -e "${BOLD}======================================================${NC}"
@@ -200,20 +135,25 @@ echo "     - Requires: Write access to webroot, port 80 open"
 echo ""
 echo "  3) Nginx (Certbot automatically configures Nginx)"
 echo "     - Best if: Nginx is running and you want automatic SSL setup"
-echo "     - Requires: Nginx installed, port 80 open"
+echo "     - Requires: Nginx installed + python3-certbot-nginx plugin, port 80 open"
 echo ""
 echo "  4) DNS (Manual TXT record - for wildcard certs or port 80 blocked)"
 echo "     - Best if: Port 80 is blocked, or you need wildcard (*.domain.com)"
-echo "     - Requires: Access to DNS management"
+echo "     - Requires: Access to DNS management (runs interactively)"
 echo ""
 
 read -p "Enter choice [1-4]: " VALIDATION_METHOD
+
+STOPPED_SERVICE=""
+DOCKER_CONTAINER=""
+NEED_PORT_80=false
 
 case $VALIDATION_METHOD in
     1)
         log_info "Selected: Standalone mode"
         CERTBOT_MODE="standalone"
         CERTBOT_ARGS="certonly --standalone"
+        NEED_PORT_80=true
         ;;
     2)
         log_info "Selected: Webroot mode"
@@ -224,6 +164,7 @@ case $VALIDATION_METHOD in
         fi
         CERTBOT_MODE="webroot"
         CERTBOT_ARGS="certonly --webroot -w $WEBROOT_PATH"
+        NEED_PORT_80=true
         ;;
     3)
         log_info "Selected: Nginx mode"
@@ -231,12 +172,26 @@ case $VALIDATION_METHOD in
             log_error "Nginx is not installed. Please install it first or choose another method."
             exit 1
         fi
+        # Ensure the nginx plugin is installed
+        if ! dpkg -l 2>/dev/null | grep -q python3-certbot-nginx; then
+            log_info "Installing python3-certbot-nginx..."
+            apt-get update -qq
+            apt-get install -y -qq python3-certbot-nginx > /dev/null 2>&1 || {
+                log_error "Failed to install python3-certbot-nginx."
+                exit 1
+            }
+            log_success "python3-certbot-nginx installed."
+        else
+            log_success "python3-certbot-nginx already present."
+        fi
         CERTBOT_MODE="nginx"
         CERTBOT_ARGS="--nginx"
+        NEED_PORT_80=true
         ;;
     4)
-        log_info "Selected: DNS mode (manual)"
+        log_info "Selected: DNS mode (manual / interactive)"
         log_warn "You will need to manually add a TXT record to your DNS."
+        log_warn "This mode runs interactively (no --non-interactive)."
         read -p "Do you want a wildcard certificate (*.domain.com)? (y/n): " -n 1 -r
         echo ""
         if [[ $REPLY =~ ^[Yy]$ ]]; then
@@ -246,12 +201,84 @@ case $VALIDATION_METHOD in
         fi
         CERTBOT_MODE="dns"
         CERTBOT_ARGS="certonly --manual --preferred-challenges dns"
+        NEED_PORT_80=false
         ;;
     *)
         log_error "Invalid choice. Please run again and select 1-4."
         exit 1
         ;;
 esac
+
+# ---------- Check Port 80 (only when required by the chosen method) ----------
+if [ "$NEED_PORT_80" = true ]; then
+    echo ""
+    log_info "Checking port 80 availability..."
+
+    PORT_80_PROCESS=""
+    if command -v ss > /dev/null 2>&1; then
+        PORT_80_PROCESS=$(ss -tlnp | grep ':80 ' | head -1)
+    elif command -v netstat > /dev/null 2>&1; then
+        PORT_80_PROCESS=$(netstat -tlnp | grep ':80 ' | head -1)
+    elif command -v lsof > /dev/null 2>&1; then
+        PORT_80_PROCESS=$(lsof -i :80 2>/dev/null | grep LISTEN | head -1)
+    fi
+
+    if [ -n "$PORT_80_PROCESS" ]; then
+        log_warn "Port 80 is already in use!"
+        echo ""
+        echo -e "${YELLOW}Process occupying port 80:${NC}"
+        echo "  $PORT_80_PROCESS"
+        echo ""
+        
+        read -p "Do you want to stop this service temporarily? (y/n): " -n 1 -r
+        echo ""
+        
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            SERVICE_NAME=""
+            
+            if echo "$PORT_80_PROCESS" | grep -q "nginx"; then
+                SERVICE_NAME="nginx"
+            elif echo "$PORT_80_PROCESS" | grep -q "apache2"; then
+                SERVICE_NAME="apache2"
+            elif echo "$PORT_80_PROCESS" | grep -q "httpd"; then
+                SERVICE_NAME="httpd"
+            elif echo "$PORT_80_PROCESS" | grep -q "docker"; then
+                log_warn "Docker is using port 80. You may need to stop the container manually."
+                read -p "Enter container name/ID to stop (or leave empty): " DOCKER_CONTAINER
+                if [ -n "$DOCKER_CONTAINER" ]; then
+                    docker stop "$DOCKER_CONTAINER" 2>/dev/null
+                    log_success "Docker container stopped."
+                fi
+            fi
+            
+            if [ -n "$SERVICE_NAME" ]; then
+                log_info "Stopping $SERVICE_NAME..."
+                systemctl stop "$SERVICE_NAME" 2>/dev/null
+                STOPPED_SERVICE="$SERVICE_NAME"
+                sleep 2
+                log_success "$SERVICE_NAME stopped."
+            fi
+            
+            sleep 1
+            if command -v ss > /dev/null 2>&1; then
+                if ss -tlnp | grep -q ':80 '; then
+                    log_error "Port 80 is still in use. Please stop the service manually."
+                    exit 1
+                fi
+            fi
+            log_success "Port 80 is now available."
+        else
+            log_warn "Port 80 is in use. Certbot may fail."
+            read -p "Continue anyway? (y/n): " -n 1 -r
+            echo ""
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                exit 1
+            fi
+        fi
+    else
+        log_success "Port 80 is available."
+    fi
+fi
 
 # ---------- Obtain Certificate ----------
 echo ""
@@ -270,11 +297,12 @@ else
 fi
 
 # Add email and agreement
-CERTBOT_CMD="$CERTBOT_CMD --email $EMAIL --agree-tos --non-interactive"
-
-# For standalone/webroot, add no-eff-email
-if [ "$CERTBOT_MODE" != "dns" ] && [ "$CERTBOT_MODE" != "nginx" ]; then
-    CERTBOT_CMD="$CERTBOT_CMD --no-eff-email"
+if [ "$CERTBOT_MODE" = "dns" ]; then
+    # Manual DNS challenge requires interaction
+    CERTBOT_CMD="$CERTBOT_CMD --email $EMAIL --agree-tos"
+    log_warn "Running interactively for the DNS challenge. Follow the on-screen instructions."
+else
+    CERTBOT_CMD="$CERTBOT_CMD --email $EMAIL --agree-tos --non-interactive --no-eff-email"
 fi
 
 # Execute
@@ -287,6 +315,25 @@ else
     log_error "Failed to obtain SSL certificate."
     log_warn "Check the log: /var/log/letsencrypt/letsencrypt.log"
     exit 1
+fi
+
+# ---------- Restart any services we stopped ----------
+if [ -n "$STOPPED_SERVICE" ]; then
+    log_info "Restarting service that was stopped earlier: $STOPPED_SERVICE"
+    if systemctl start "$STOPPED_SERVICE" 2>/dev/null; then
+        log_success "$STOPPED_SERVICE restarted."
+    else
+        log_warn "Failed to restart $STOPPED_SERVICE. Please start it manually."
+    fi
+fi
+
+if [ -n "$DOCKER_CONTAINER" ]; then
+    log_info "Restarting Docker container that was stopped earlier: $DOCKER_CONTAINER"
+    if docker start "$DOCKER_CONTAINER" 2>/dev/null; then
+        log_success "Docker container $DOCKER_CONTAINER restarted."
+    else
+        log_warn "Failed to restart container $DOCKER_CONTAINER. Please start it manually."
+    fi
 fi
 
 # ---------- Show Certificate Info ----------
@@ -355,12 +402,6 @@ if [ "$CERTBOT_MODE" = "standalone" ]; then
     echo "     ssl_certificate     $CERT_DIR/fullchain.pem;"
     echo "     ssl_certificate_key $CERT_DIR/privkey.pem;"
     echo "  2. Restart your web server"
-    echo ""
-fi
-
-if [ -n "$SERVICE_NAME" ]; then
-    echo "You stopped $SERVICE_NAME earlier. To restart it:"
-    echo "  sudo systemctl start $SERVICE_NAME"
     echo ""
 fi
 

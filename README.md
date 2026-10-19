@@ -65,6 +65,7 @@ These scripts were built to solve real-world problems: sanctions blocking Docker
 | `install-docker.sh` | Installs Docker + Compose with resilient Iranian mirror fallback | Fresh server that needs Docker |
 | `clone-repo.sh` | Clones a GitHub repo to `/opt` with dependencies | Deploy a project from GitHub |
 | `install-ssl.sh` | Obtains SSL certificate from Let's Encrypt via Certbot | Secure a domain with HTTPS |
+| `tunnel-install.sh` | Installs SoftEther VPN Client + OpenVPN (for tunneling) | Set up a VPN client on the server |
 
 ---
 
@@ -75,22 +76,28 @@ All scripts can be run directly via `curl` — no need to clone the repository f
 ### Docker Installation
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/alpha330/intial_ubuntu_server/main/install-docker.sh)
+curl -fsSL https://raw.githubusercontent.com/alpha330/intial_ubuntu_server/main/install-docker.sh | sudo bash
 ```
 
 ### Clone a GitHub Repository
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/alpha330/intial_ubuntu_server/main/clone-repo.sh)
+curl -fsSL https://raw.githubusercontent.com/alpha330/intial_ubuntu_server/main/clone-repo.sh | sudo bash
 ```
 
 ### Install SSL Certificate
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/alpha330/intial_ubuntu_server/main/install-ssl.sh)
+curl -fsSL https://raw.githubusercontent.com/alpha330/intial_ubuntu_server/main/install-ssl.sh | sudo bash
 ```
 
-> **Note:** All commands assume the repository is at `alpha330/intial_ubuntu_server`. Replace the path if you fork it.
+### VPN / Tunnel Client
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alpha330/intial_ubuntu_server/main/tunnel-install.sh | sudo bash
+```
+
+> **Note:** Prefer `curl ... | sudo bash` over `sudo bash <(curl ...)` because process substitution often fails under sudo.
 
 ---
 
@@ -317,6 +324,22 @@ certbot delete --cert-name <domain>     # Delete a certificate
 
 ---
 
+### 4. VPN / Tunnel Client Installer
+
+**File:** `tunnel-install.sh`
+
+#### What It Does
+
+1. Detects OS and architecture
+2. Installs SoftEther VPN Client (compiles from official GitHub release)
+3. Installs OpenVPN
+4. Creates a systemd service for SoftEther
+5. Verifies checksum of the downloaded SoftEther archive
+
+Designed for headless servers (no GNOME packages).
+
+---
+
 ## 🛠️ Requirements
 
 | Requirement | Details |
@@ -523,10 +546,11 @@ Then use `--dns-cloudflare` with a credentials file. Currently, the script uses 
 ```
 .
 ├── README.md
+├── LICENSE
 ├── install-docker.sh       # Docker installation script
 ├── clone-repo.sh           # GitHub clone script
 ├── install-ssl.sh          # SSL certificate installer
-└── LICENSE
+└── tunnel-install.sh       # SoftEther + OpenVPN client installer
 ```
 
 ---

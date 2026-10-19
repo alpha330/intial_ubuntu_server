@@ -128,7 +128,8 @@ if [ "$is_private" = true ]; then
     echo "  4. Check 'repo' scope"
     echo "  5. Click 'Generate token' and copy it"
     echo ""
-    read -p "Enter your Personal Access Token: " github_token
+    read -s -p "Enter your Personal Access Token: " github_token
+    echo ""
     
     # Use token in URL
     REPO_URL="https://${github_user}:${github_token}@github.com/${github_user}/${repo_name}.git"

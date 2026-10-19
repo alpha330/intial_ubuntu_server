@@ -54,6 +54,37 @@ fi
 
 log_success "Detected OS: $OS $VER ($CODENAME)"
 
+# Basic version check
+if [[ "$OS" == "ubuntu" ]]; then
+    # Ubuntu 20.04+
+    if [[ "${VER%%.*}" -lt 20 ]]; then
+        log_error "Ubuntu $VER is too old. Please use 20.04 or newer."
+        exit 1
+    fi
+elif [[ "$OS" == "debian" ]]; then
+    # Debian 11+
+    if [[ "${VER%%.*}" -lt 11 ]]; then
+        log_error "Debian $VER is too old. Please use 11 or newer."
+        exit 1
+    fi
+fi
+
+# ---------- Check if Docker is already installed ----------
+if command -v docker > /dev/null 2>&1 && docker info > /dev/null 2>&1; then
+    log_success "Docker is already installed and running."
+    read -p "Skip full reinstall and only reconfigure daemon.json? (recommended) [Y/n]: " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+        SKIP_INSTALL=true
+        log_info "Skipping package installation. Will only update daemon configuration."
+    else
+        SKIP_INSTALL=false
+        log_warn "Proceeding with full reinstall. Running containers will be stopped."
+    fi
+else
+    SKIP_INSTALL=false
+fi
+
 # ---------- Ask User: Iran or Global? ----------
 echo ""
 echo -e "${BOLD}======================================================${NC}"
@@ -91,10 +122,14 @@ apt-get install -y -qq ca-certificates curl gnupg lsb-release apt-transport-http
 log_success "Prerequisites installed."
 
 # ---------- Remove Old Docker Versions ----------
-log_info "Removing any old Docker versions..."
-apt-get remove -y -qq docker docker-engine docker.io containerd runc docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-compose > /dev/null 2>&1 || true
-apt-get autoremove -y -qq > /dev/null 2>&1 || true
-log_success "Old versions removed."
+if [ "$SKIP_INSTALL" != true ]; then
+    log_info "Removing any old Docker versions..."
+    apt-get remove -y -qq docker docker-engine docker.io containerd runc docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-compose > /dev/null 2>&1 || true
+    apt-get autoremove -y -qq > /dev/null 2>&1 || true
+    log_success "Old versions removed."
+else
+    log_info "Skipping removal of existing Docker packages."
+fi
 
 # ---------- Helper: Fetch Docker GPG Key ----------
 # Tries official Docker key, then a list of Iranian mirrors.
@@ -208,88 +243,92 @@ try_install_docker_from_distro() {
 }
 
 # ---------- Install Docker ----------
-INSTALL_SUCCESS=false
-INSTALL_METHOD=""
+if [ "$SKIP_INSTALL" = true ]; then
+    log_info "Skipping Docker package installation (already present)."
+    INSTALL_SUCCESS=true
+    INSTALL_METHOD="Already installed (reconfigure only)"
+else
+    INSTALL_SUCCESS=false
+    INSTALL_METHOD=""
 
-# 1. Fetch GPG key (try official first, then mirrors)
-if ! fetch_docker_gpg_key; then
-    log_error "Could not fetch Docker GPG key from any source."
-    log_warn "Will try distro default repositories as a last resort."
-fi
-
-if [ "$SERVER_LOCATION" = "global" ]; then
-    # ---------- Global: Official Docker Repo ----------
-    log_info "Installing Docker from official Docker repositories..."
-
-    if try_install_docker_from_mirror "https://download.docker.com/linux/${OS}" "Official Docker"; then
-        INSTALL_SUCCESS=true
-        INSTALL_METHOD="Official Docker Repo"
+    # 1. Fetch GPG key (try official first, then mirrors)
+    if ! fetch_docker_gpg_key; then
+        log_error "Could not fetch Docker GPG key from any source."
+        log_warn "Will try distro default repositories as a last resort."
     fi
 
-else
-    # ---------- Iran: Try Iranian Mirrors in Order ----------
-    log_info "Trying Iranian Docker mirrors (fallback chain)..."
+    if [ "$SERVER_LOCATION" = "global" ]; then
+        # ---------- Global: Official Docker Repo ----------
+        log_info "Installing Docker from official Docker repositories..."
 
-    # Order matters: put the most reliable / currently-working ones first.
-    # ArvanCloud is currently known to be flaky (503), so it's near the end.
-    IRAN_MIRRORS=(
-        "https://mirror.iranserver.com/docker-ce/linux/${OS}|IranServer"
-        "https://mirror.mobinhost.com/docker-ce/linux/${OS}|MobinHost"
-        "https://mirror.kernel.ir/docker-ce/linux/${OS}|Kernel"
-        "https://mirror.shatel.ir/docker-ce/linux/${OS}|Shatel"
-        "https://mirror.arvancloud.ir/docker-ce/linux/${OS}|ArvanCloud"
-    )
-
-    for entry in "${IRAN_MIRRORS[@]}"; do
-        mirror_base="${entry%%|*}"
-        mirror_name="${entry##*|}"
-
-        if try_install_docker_from_mirror "$mirror_base" "$mirror_name"; then
-            INSTALL_SUCCESS=true
-            INSTALL_METHOD="Iranian Mirror (${mirror_name})"
-            break
-        fi
-
-        log_warn "Mirror ${mirror_name} failed. Trying next mirror..."
-        echo ""
-    done
-
-    # If all Iranian mirrors failed, try official Docker repo
-    if [ "$INSTALL_SUCCESS" = false ]; then
-        log_warn "All Iranian mirrors failed."
-        log_info "Trying official Docker repositories as fallback..."
         if try_install_docker_from_mirror "https://download.docker.com/linux/${OS}" "Official Docker"; then
             INSTALL_SUCCESS=true
-            INSTALL_METHOD="Official Docker Repo (fallback)"
+            INSTALL_METHOD="Official Docker Repo"
+        fi
+
+    else
+        # ---------- Iran: Try Iranian Mirrors in Order ----------
+        log_info "Trying Iranian Docker mirrors (fallback chain)..."
+
+        IRAN_MIRRORS=(
+            "https://mirror.iranserver.com/docker-ce/linux/${OS}|IranServer"
+            "https://mirror.mobinhost.com/docker-ce/linux/${OS}|MobinHost"
+            "https://mirror.kernel.ir/docker-ce/linux/${OS}|Kernel"
+            "https://mirror.shatel.ir/docker-ce/linux/${OS}|Shatel"
+            "https://mirror.arvancloud.ir/docker-ce/linux/${OS}|ArvanCloud"
+        )
+
+        for entry in "${IRAN_MIRRORS[@]}"; do
+            mirror_base="${entry%%|*}"
+            mirror_name="${entry##*|}"
+
+            if try_install_docker_from_mirror "$mirror_base" "$mirror_name"; then
+                INSTALL_SUCCESS=true
+                INSTALL_METHOD="Iranian Mirror (${mirror_name})"
+                break
+            fi
+
+            log_warn "Mirror ${mirror_name} failed. Trying next mirror..."
+            echo ""
+        done
+
+        # If all Iranian mirrors failed, try official Docker repo
+        if [ "$INSTALL_SUCCESS" = false ]; then
+            log_warn "All Iranian mirrors failed."
+            log_info "Trying official Docker repositories as fallback..."
+            if try_install_docker_from_mirror "https://download.docker.com/linux/${OS}" "Official Docker"; then
+                INSTALL_SUCCESS=true
+                INSTALL_METHOD="Official Docker Repo (fallback)"
+            fi
         fi
     fi
-fi
 
-# 2. Last resort: distro default repos
-if [ "$INSTALL_SUCCESS" = false ]; then
-    log_warn "Docker official/mirror installation failed."
-    if try_install_docker_from_distro; then
-        INSTALL_SUCCESS=true
-        INSTALL_METHOD="Distro Default Repo (docker.io)"
+    # 2. Last resort: distro default repos
+    if [ "$INSTALL_SUCCESS" = false ]; then
+        log_warn "Docker official/mirror installation failed."
+        if try_install_docker_from_distro; then
+            INSTALL_SUCCESS=true
+            INSTALL_METHOD="Distro Default Repo (docker.io)"
+        fi
     fi
-fi
 
-# 3. If everything failed, exit with clear error
-if [ "$INSTALL_SUCCESS" = false ]; then
-    log_error "All Docker installation methods failed!"
-    echo ""
-    echo "Troubleshooting tips:"
-    echo "  1. Check your internet connection:"
-    echo "     curl -I https://download.docker.com"
-    echo "  2. Check DNS:"
-    echo "     cat /etc/resolv.conf"
-    echo "     (try setting nameserver 178.22.122.100)"
-    echo "  3. Manually inspect the docker.list file:"
-    echo "     cat /etc/apt/sources.list.d/docker.list"
-    echo "  4. Try running with Global option and a DNS shecan:"
-    echo "     bash <(curl -fsSL <this-script-url>)"
-    echo ""
-    exit 1
+    # 3. If everything failed, exit with clear error
+    if [ "$INSTALL_SUCCESS" = false ]; then
+        log_error "All Docker installation methods failed!"
+        echo ""
+        echo "Troubleshooting tips:"
+        echo "  1. Check your internet connection:"
+        echo "     curl -I https://download.docker.com"
+        echo "  2. Check DNS:"
+        echo "     cat /etc/resolv.conf"
+        echo "     (try setting nameserver 178.22.122.100)"
+        echo "  3. Manually inspect the docker.list file:"
+        echo "     cat /etc/apt/sources.list.d/docker.list"
+        echo "  4. Try running with Global option and a DNS shecan:"
+        echo "     bash <(curl -fsSL <this-script-url>)"
+        echo ""
+        exit 1
+    fi
 fi
 
 log_success "Docker install completed via: ${INSTALL_METHOD}"
