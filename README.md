@@ -30,7 +30,7 @@ A collection of production-ready, interactive bash scripts for setting up and ma
 This repository contains a set of battle-tested bash scripts to automate common server setup tasks. Each script is:
 
 - **Interactive** — Guides you through the process step-by-step
-- **Idempotent** — Safe to run multiple times
+- **Re-runnable** — Detects existing installs; the Docker script only rewrites `daemon.json` / restarts Docker when the config actually changes
 - **Smart** — Detects your OS, checks for existing installations, and handles edge cases
 - **Iran-friendly** — Optional Iranian mirror support for faster, unrestricted access
 - **Resilient** — Fallback chains for mirrors (if one fails, tries the next)
@@ -71,33 +71,41 @@ These scripts were built to solve real-world problems: sanctions blocking Docker
 
 ## ⚡ Quick Start
 
-All scripts can be run directly via `curl` — no need to clone the repository first.
+All scripts can be run directly from GitHub — no need to clone the repository first. Run them from an interactive SSH session (they ask questions).
 
-### Docker Installation
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/alpha330/intial_ubuntu_server/main/install-docker.sh | sudo bash
-```
-
-### Clone a GitHub Repository
+### Recommended: `sudo bash -c "$(curl ...)"`
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alpha330/intial_ubuntu_server/main/clone-repo.sh | sudo bash
+# Docker
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/alpha330/intial_ubuntu_server/main/install-docker.sh)"
+
+# Clone a GitHub repository
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/alpha330/intial_ubuntu_server/main/clone-repo.sh)"
+
+# SSL certificate
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/alpha330/intial_ubuntu_server/main/install-ssl.sh)"
+
+# VPN / tunnel client
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/alpha330/intial_ubuntu_server/main/tunnel-install.sh)"
 ```
 
-### Install SSL Certificate
+### Safest: download, review, then run
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alpha330/intial_ubuntu_server/main/install-ssl.sh | sudo bash
+curl -fsSL -o install-docker.sh https://raw.githubusercontent.com/alpha330/intial_ubuntu_server/main/install-docker.sh
+less install-docker.sh
+sudo bash install-docker.sh
 ```
 
-### VPN / Tunnel Client
+### Pin a specific version (recommended for production)
+
+`main` can change at any time. To always run the exact code you reviewed, replace `main` in the URL with a commit SHA (or a tag):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alpha330/intial_ubuntu_server/main/tunnel-install.sh | sudo bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/alpha330/intial_ubuntu_server/<commit-sha>/install-docker.sh)"
 ```
 
-> **Note:** Prefer `curl ... | sudo bash` over `sudo bash <(curl ...)` because process substitution often fails under sudo.
+> **Note:** `curl ... | sudo bash` also works: all prompts are read from `/dev/tty`, not from the pipe. If no terminal is available (e.g. cron, CI), the scripts exit with a clear error instead of guessing answers. Avoid `sudo bash <(curl ...)` — sudo closes the process-substitution file descriptor.
 
 ---
 
@@ -110,17 +118,20 @@ curl -fsSL https://raw.githubusercontent.com/alpha330/intial_ubuntu_server/main/
 #### What It Does
 
 1. Verifies you're running as root
-2. Detects your OS (Ubuntu or Debian)
-3. Asks whether your server is **inside** or **outside** Iran
-4. Removes any old Docker versions
-5. **Tries multiple Iranian mirrors in order** (IranServer, MobinHost, Kernel, Shatel, ArvanCloud)
-6. **Falls back to official Docker repos** if all Iranian mirrors fail
-7. **Falls back to distro default repos** (`docker.io`) as a last resort
-8. Configures `/etc/docker/daemon.json` with:
+2. Detects your OS (Ubuntu 20.04+ or Debian 11+; Debian testing/sid allowed with a warning)
+3. If Docker is already running, offers a **reconfigure-only** mode (default) that skips the reinstall
+4. Asks whether your server is **inside** or **outside** Iran
+5. Removes any old Docker versions (full install only)
+6. Fetches Docker's GPG key (official first, then mirrors) and **accepts it only if its fingerprint is `9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88`** (Docker's official key). If no verified key is found, the docker-ce repositories are skipped
+7. **Tries multiple Iranian mirrors in order** (IranServer, MobinHost, Kernel, Shatel, ArvanCloud)
+8. **Falls back to official Docker repos** if all Iranian mirrors fail
+9. **Falls back to distro default repos** (`docker.io`) as a last resort
+10. Configures `/etc/docker/daemon.json` with:
    - Iranian registry mirrors (if inside Iran)
    - Log rotation (10 MB per file, 3 files max)
-9. Enables and starts the Docker service
-10. Verifies the installation with a `hello-world` test
+   - The file is only rewritten (after a backup) if its content changes
+11. Restarts Docker **only if `daemon.json` changed**. If containers are running, it asks first — restarting Docker stops them, and containers without a restart policy (e.g. `restart: unless-stopped`) stay stopped
+12. Verifies the installation with a `hello-world` test
 
 #### Interactive Prompts
 
@@ -188,12 +199,13 @@ These allow you to pull Docker images without hitting sanctions-related blocks.
 #### What It Does
 
 1. Verifies you're running as root
-2. Detects your OS
+2. Detects your OS (Ubuntu 20.04+ or Debian 11+)
 3. Installs Git, curl, wget, unzip, and certificates
 4. Asks for your GitHub username, repository name, and branch
 5. Detects whether the repo is public or private
 6. Clones the repo into `/opt/<repo-name>`
-7. Optionally starts the project with Docker Compose (if a compose file is found)
+7. For private repos: the token is not echoed, and after cloning the remote is reset to the clean URL so **the token is not left in `.git/config`**. Optionally stores it in a root-only file (`/root/.git-credentials-<repo>`, mode 600) for future `git pull`
+8. Optionally starts the project with Docker Compose (if a compose file is found)
 
 #### Interactive Prompts
 
@@ -215,6 +227,8 @@ If your repository is private, the script asks for a **Personal Access Token (PA
 5. Click **Generate token** and copy it immediately (it's shown only once)
 
 > ⚠️ **Important:** GitHub no longer supports password authentication for Git operations. You **must** use a Personal Access Token.
+
+> 🔐 **Safer options:** a [fine-grained token](https://github.com/settings/personal-access-tokens) with read-only *Contents* access to just this repository, or an [SSH deploy key](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys).
 
 #### Target Directory
 
@@ -244,25 +258,35 @@ docker compose up -d          # Start services (if compose file exists)
 #### What It Does
 
 1. Verifies you're running as root
-2. Detects your OS
+2. Detects your OS (Ubuntu 20.04+ or Debian 11+)
 3. Checks if **Certbot** is installed; installs it if missing
 4. Asks for your **domain** and **email**
-5. Checks if **port 80** is available
-6. If port 80 is occupied, **identifies the service** (nginx, apache2, docker, etc.) and offers to stop it temporarily
-7. Asks which **validation method** to use:
+5. Asks which **validation method** to use:
    - **Standalone** — Certbot runs a temporary web server on port 80
-   - **Webroot** — Places challenge files in your existing webroot
-   - **Nginx** — Certbot auto-configures Nginx
-   - **DNS** — Manual TXT record (supports wildcard certificates)
-8. Obtains the SSL certificate from **Let's Encrypt**
-9. Configures **auto-renewal** (systemd timer or cron job)
-10. Tests renewal with a dry-run
+   - **Webroot** — Places challenge files in your existing webroot (web server keeps running)
+   - **Nginx** — Certbot auto-configures Nginx (installs `python3-certbot-nginx` if needed; nginx keeps running)
+   - **DNS manual** — Manual TXT record (supports wildcard certificates). ⚠️ **Does not auto-renew**
+   - **DNS Cloudflare** — Uses `python3-certbot-dns-cloudflare` and an API token (wildcard OK, **auto-renews**)
+6. **Standalone only:** checks if **port 80** is free; if not, identifies the service (nginx, apache2, docker, etc.) and offers to stop it temporarily. It is **always restarted afterwards — even if Certbot fails** — and renewal pre/post hooks are saved so future renewals stop/start it automatically
+7. Obtains the SSL certificate from **Let's Encrypt**
+8. Configures **auto-renewal** (systemd timer or cron job)
+9. Tests renewal with a dry-run for this certificate (skipped for manual DNS certificates)
 
 #### Interactive Prompts
 
 ```
 Enter your domain (e.g., example.com): example.com
 Enter your email (for Let's Encrypt notifications): admin@example.com
+
+How would you like to validate domain ownership?
+
+  1) Standalone (Certbot runs a temporary web server on port 80)
+  2) Webroot (Place files in your existing web server's root)
+  3) Nginx (Certbot automatically configures Nginx)
+  4) DNS manual (TXT record - for wildcard certs or port 80 blocked)
+  5) DNS via Cloudflare API (wildcard OK, auto-renews)
+
+Enter choice [1-5]: 1
 
 Checking port 80 availability...
 [WARNING] Port 80 is already in use!
@@ -272,15 +296,6 @@ Process occupying port 80:
 Do you want to stop this service temporarily? (y/n): y
 [INFO] Stopping nginx...
 [SUCCESS] nginx stopped.
-
-How would you like to validate domain ownership?
-
-  1) Standalone (Certbot runs a temporary web server on port 80)
-  2) Webroot (Place files in your existing web server's root)
-  3) Nginx (Certbot automatically configures Nginx)
-  4) DNS (Manual TXT record - for wildcard certs or port 80 blocked)
-
-Enter choice [1-4]: 1
 ```
 
 #### Validation Methods Explained
@@ -288,9 +303,10 @@ Enter choice [1-4]: 1
 | Method | Best For | Requirements |
 |--------|----------|--------------|
 | **Standalone** | No web server running | Port 80 free |
-| **Webroot** | Nginx/Apache with known webroot | Write access to webroot, port 80 open |
-| **Nginx** | Nginx running, want auto-config | Nginx installed, port 80 open |
-| **DNS** | Wildcard certs, port 80 blocked | Access to DNS management |
+| **Webroot** | Nginx/Apache with known webroot | Write access to webroot, web server serving it on port 80 |
+| **Nginx** | Nginx running, want auto-config | Nginx installed and running on port 80 |
+| **DNS manual** | One-off wildcard certs, port 80 blocked | Access to DNS management. **No auto-renewal** |
+| **DNS Cloudflare** | Wildcard certs with auto-renewal | DNS on Cloudflare, API token with *Zone:DNS:Edit* |
 
 #### Certificate Location
 
@@ -313,6 +329,8 @@ The script automatically sets up renewal via:
 
 Renewal runs **twice daily** and reloads Nginx on success.
 
+> ⚠️ **Manual DNS certificates (option 4) cannot renew automatically** — Certbot needs an auth hook to create the TXT record. Re-run the script before the certificate expires (90 days), or use a DNS plugin such as option 5 (`python3-certbot-dns-cloudflare`). The script skips the renewal dry-run for manual certificates.
+
 #### Useful Certbot Commands
 
 ```bash
@@ -334,7 +352,8 @@ certbot delete --cert-name <domain>     # Delete a certificate
 2. Installs SoftEther VPN Client (compiles from official GitHub release)
 3. Installs OpenVPN
 4. Creates a systemd service for SoftEther
-5. Verifies checksum of the downloaded SoftEther archive
+5. Verifies the SHA256 checksum of the downloaded SoftEther archive on **amd64 and arm64**. On i386/armhf there is no pinned checksum, so the script asks for explicit confirmation (default: abort)
+6. Network Manager OpenVPN plugin is **optional** (asked, default no) — only useful on desktops
 
 Designed for headless servers (no GNOME packages).
 
@@ -447,7 +466,7 @@ sudo systemctl restart docker
 
 **Cause:** Another service (nginx, apache2, docker) is using port 80.
 
-**Solution:** The `install-ssl.sh` script detects this and offers to stop the service temporarily. If you prefer to keep the service running, use **Webroot** or **Nginx** validation method instead of **Standalone**.
+**Solution:** In **Standalone** mode, `install-ssl.sh` detects this and offers to stop the service temporarily (it is restarted automatically afterwards). If you prefer to keep the service running, use the **Webroot** or **Nginx** validation method instead — those modes never stop your web server.
 
 ---
 
@@ -471,9 +490,10 @@ curl -I http://<your-domain>/.well-known/acme-challenge/test
 
 ## 🔐 Security Notes
 
-- **Tokens:** Never commit Personal Access Tokens to Git. Use environment variables or a secrets manager.
+- **Tokens:** Never commit Personal Access Tokens to Git. `clone-repo.sh` hides the token while typing and removes it from `.git/config` after cloning. Prefer fine-grained read-only tokens or SSH deploy keys.
+- **Pinning:** For production, run a reviewed commit SHA instead of `main` (see Quick Start).
 - **Root Access:** These scripts require root. Review the code before running on production servers.
-- **Mirrors:** Iranian mirrors are third-party services. While generally reliable, treat them as you would any external dependency.
+- **Mirrors:** Iranian mirrors are third-party services. While generally reliable, treat them as you would any external dependency. The Docker GPG key is only accepted if its fingerprint matches Docker's official key, even when served by a mirror.
 - **Backups:** The Docker script backs up `/etc/docker/daemon.json` before modifying it.
 - **SSL Keys:** Private keys in `/etc/letsencrypt/live/` should be readable only by root.
 - **Auto-Renewal:** Certbot certificates expire after 90 days. The script configures auto-renewal, but monitor it periodically.
@@ -496,7 +516,11 @@ The script asks for the branch name. Just enter it when prompted (e.g., `master`
 
 ### Can I run these scripts multiple times?
 
-Yes. All scripts are idempotent — they detect existing installations and skip redundant steps. The Docker script even backs up your `daemon.json` before overwriting it.
+Mostly, yes. They detect existing installations and skip redundant steps, but they are not strictly idempotent:
+
+- `install-docker.sh` offers a reconfigure-only mode when Docker is running; `daemon.json` is only rewritten (with a backup) and Docker only restarted when the config changes. A **full reinstall** removes and reinstalls the packages and stops running containers.
+- `clone-repo.sh` asks before deleting an existing `/opt/<repo>`.
+- `install-ssl.sh` re-requests the certificate (`--cert-name <domain>`) — mind Let's Encrypt rate limits.
 
 ### How do I update a cloned repository?
 
@@ -519,11 +543,11 @@ Yes. The script uses `dpkg --print-architecture` to detect your architecture aut
 
 ### Can I get a wildcard SSL certificate?
 
-Yes! Use the **DNS** validation method in `install-ssl.sh`. When prompted, choose wildcard mode. Note that you'll need to manually add a TXT record to your DNS.
+Yes! Use a **DNS** validation method in `install-ssl.sh` and choose wildcard mode when prompted. With **DNS manual** you add the TXT record yourself and the certificate won't auto-renew; with **DNS Cloudflare** it is fully automatic.
 
 ### How often do Let's Encrypt certificates expire?
 
-Every **90 days**. The script configures auto-renewal, so you shouldn't need to do anything. To verify auto-renewal is working:
+Every **90 days**. The script configures auto-renewal (except for manual DNS certificates), so you shouldn't need to do anything. To verify auto-renewal is working:
 
 ```bash
 sudo certbot renew --dry-run
@@ -531,13 +555,9 @@ sudo certbot renew --dry-run
 
 ### What if I use Cloudflare for DNS?
 
-For automatic DNS validation with Cloudflare, you can install the Cloudflare plugin:
+Choose option **5 (DNS via Cloudflare API)** in `install-ssl.sh`. It installs `python3-certbot-dns-cloudflare`, asks for an API token (hidden input), stores it in `/root/.secrets/certbot/cloudflare.ini` (mode 600) and issues a certificate that renews automatically. Create the token at https://dash.cloudflare.com/profile/api-tokens with the *Edit zone DNS* template, limited to your zone.
 
-```bash
-sudo apt install python3-certbot-dns-cloudflare
-```
-
-Then use `--dns-cloudflare` with a credentials file. Currently, the script uses manual DNS mode, but you can extend it.
+For other DNS providers, install the matching Certbot plugin (e.g. `python3-certbot-dns-route53`, `python3-certbot-dns-digitalocean`) and run certbot with it directly.
 
 ---
 

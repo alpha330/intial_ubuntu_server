@@ -5,9 +5,12 @@
 #  Features:
 #  - Auto-detects architecture (amd64/arm64)
 #  - Installs SoftEther VPN Client from GitHub
-#  - Installs OpenVPN and Network Manager plugin
+#  - Installs OpenVPN (Network Manager plugin optional, for desktops)
+#  - Verifies SHA256 of the SoftEther archive (amd64/arm64);
+#    other architectures require explicit confirmation
 #  - Creates systemd service for SoftEther
 #  - Interactive & guided
+#  - Works with: curl ... | sudo bash  (prompts read from /dev/tty)
 # ======================================================
 
 # ---------- Colors ----------
@@ -24,6 +27,18 @@ log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# ---------- Interactive Input (works with curl | bash) ----------
+# All prompts read from the terminal (fd 3 -> /dev/tty), not from stdin,
+# so the script still works when it is piped into bash.
+if ! { exec 3</dev/tty; } 2>/dev/null; then
+    log_error "No terminal (TTY) available for interactive prompts."
+    log_error "Run this script from an interactive SSH session, e.g.:"
+    # shellcheck disable=SC2016
+    echo '  sudo bash -c "$(curl -fsSL <script-url>)"'
+    exit 1
+fi
+ask() { read -r -u 3 "$@"; }
+
 # ---------- Check Root ----------
 if [ "$EUID" -ne 0 ]; then
   log_error "Please run as root (use sudo)."
@@ -32,6 +47,7 @@ fi
 
 # ---------- Detect OS & Architecture ----------
 if [ -f /etc/os-release ]; then
+    # shellcheck disable=SC1091
     . /etc/os-release
     OS=$ID
     VER=$VERSION_ID
@@ -46,7 +62,24 @@ if [[ "$OS" != "ubuntu" && "$OS" != "debian" ]]; then
 fi
 
 ARCH=$(dpkg --print-architecture)
-log_success "Detected OS: $OS $VER ($ARCH)"
+log_success "Detected OS: $OS ${VER:-${VERSION_CODENAME:-unknown}} ($ARCH)"
+
+# ---------- Version Check (Ubuntu 20.04+, Debian 11+) ----------
+# Debian testing/sid has no VERSION_ID: allow it with a warning.
+check_os_version() {
+    local min=20
+    [ "$OS" = "debian" ] && min=11
+    local major="${VER%%.*}"
+    if [[ ! "$major" =~ ^[0-9]+$ ]]; then
+        log_warn "No numeric VERSION_ID (${VERSION_CODENAME:-unknown}, probably testing/sid). Skipping version check."
+        return 0
+    fi
+    if [ "$major" -lt "$min" ]; then
+        log_error "$OS $VER is too old. Please use $([ "$OS" = "debian" ] && echo 11 || echo 20.04) or newer."
+        exit 1
+    fi
+}
+check_os_version
 
 # ---------- Select Correct Download URL ----------
 SOFTETHER_VERSION="v4.44-9807-rtm"
@@ -67,6 +100,15 @@ fi
 
 log_info "Using SoftEther binary for: $SOFTETHER_ARCH"
 
+# ---------- Optional: Network Manager plugin (desktops only) ----------
+# Headless servers normally use netplan/systemd-networkd and only need openvpn.
+INSTALL_NM_PLUGIN=false
+ask -p "Install Network Manager OpenVPN plugin? Only useful on desktops (y/N): " -n 1
+echo ""
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    INSTALL_NM_PLUGIN=true
+fi
+
 # ---------- Install Dependencies ----------
 log_info "Installing prerequisites..."
 export DEBIAN_FRONTEND=noninteractive
@@ -83,8 +125,15 @@ apt-get install -y -qq \
   libreadline-dev \
   libncurses-dev \
   zlib1g-dev \
-  openvpn \
-  network-manager-openvpn > /dev/null 2>&1
+  openvpn > /dev/null 2>&1
+
+if [ "$INSTALL_NM_PLUGIN" = true ]; then
+    if apt-get install -y -qq network-manager-openvpn > /dev/null 2>&1; then
+        log_success "network-manager-openvpn installed."
+    else
+        log_warn "Failed to install network-manager-openvpn (optional)."
+    fi
+fi
 
 log_success "Prerequisites installed."
 
@@ -97,7 +146,7 @@ else
     SOFTETHER_URL="https://github.com/SoftEtherVPN/SoftEtherVPN_Stable/releases/download/${SOFTETHER_VERSION}/softether-vpnclient-${SOFTETHER_VERSION}-${SOFTETHER_DATE}-${SOFTETHER_ARCH}.tar.gz"
 
     TMP_DIR=$(mktemp -d)
-    cd "$TMP_DIR"
+    cd "$TMP_DIR" || exit 1
 
     log_info "Downloading from: $SOFTETHER_URL"
     if wget -q --show-progress "$SOFTETHER_URL" -O softether-client.tar.gz; then
@@ -123,7 +172,17 @@ else
             fi
             log_success "Checksum verified."
         else
-            log_warn "No checksum available for architecture $ARCH. Skipping verification."
+            log_warn "No pinned SHA256 checksum for architecture $ARCH."
+            log_warn "The download cannot be verified. Only continue if you trust the source."
+            ask -p "Continue WITHOUT checksum verification? (y/N): " -n 1
+            echo ""
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                log_error "Aborted: unverified download."
+                cd / || exit 1
+                rm -rf "$TMP_DIR"
+                exit 1
+            fi
+            log_warn "Continuing without checksum verification (user confirmed)."
         fi
     else
         log_error "Failed to download SoftEther Client from GitHub."
@@ -134,7 +193,7 @@ else
 
     log_info "Extracting archive..."
     tar xzf softether-client.tar.gz
-    cd vpnclient
+    cd vpnclient || { log_error "Archive layout unexpected (no vpnclient/ dir)."; exit 1; }
 
     log_info "Compiling SoftEther Client (accepting license automatically)..."
     echo "1" | make > /dev/null 2>&1
@@ -235,9 +294,11 @@ echo ""
 echo "2. Connect:"
 echo "   sudo openvpn --config /etc/openvpn/conf/your-config.ovpn --daemon"
 echo ""
-echo "Or use Network Manager GUI:"
-echo "   Settings -> Network -> VPN -> '+' -> Import from file..."
-echo ""
+if [ "$INSTALL_NM_PLUGIN" = true ]; then
+    echo "Or use Network Manager GUI:"
+    echo "   Settings -> Network -> VPN -> '+' -> Import from file..."
+    echo ""
+fi
 
 echo -e "${BOLD}======================================================${NC}"
 echo -e "${CYAN}${BOLD}  Service Status${NC}"

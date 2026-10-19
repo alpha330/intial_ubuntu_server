@@ -7,6 +7,8 @@
 #  - Clone repo to /opt
 #  - Interactive & guided
 #  - Supports both public and private repos
+#  - Private repos: token is never echoed and is NOT left in .git/config
+#  - Works with: curl ... | sudo bash  (prompts read from /dev/tty)
 # ======================================================
 
 set -e
@@ -26,6 +28,18 @@ log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# ---------- Interactive Input (works with curl | bash) ----------
+# All prompts read from the terminal (fd 3 -> /dev/tty), not from stdin,
+# so the script still works when it is piped into bash.
+if ! { exec 3</dev/tty; } 2>/dev/null; then
+    log_error "No terminal (TTY) available for interactive prompts."
+    log_error "Run this script from an interactive SSH session, e.g.:"
+    # shellcheck disable=SC2016
+    echo '  sudo bash -c "$(curl -fsSL <script-url>)"'
+    exit 1
+fi
+ask() { read -r -u 3 "$@"; }
+
 # ---------- Check Root ----------
 if [ "$EUID" -ne 0 ]; then
   log_error "Please run as root (use sudo)."
@@ -34,6 +48,7 @@ fi
 
 # ---------- Detect OS ----------
 if [ -f /etc/os-release ]; then
+    # shellcheck disable=SC1091
     . /etc/os-release
     OS=$ID
     VER=$VERSION_ID
@@ -47,7 +62,24 @@ if [[ "$OS" != "ubuntu" && "$OS" != "debian" ]]; then
     exit 1
 fi
 
-log_success "Detected OS: $OS $VER"
+log_success "Detected OS: $OS ${VER:-${VERSION_CODENAME:-unknown}}"
+
+# ---------- Version Check (Ubuntu 20.04+, Debian 11+) ----------
+# Debian testing/sid has no VERSION_ID: allow it with a warning.
+check_os_version() {
+    local min=20
+    [ "$OS" = "debian" ] && min=11
+    local major="${VER%%.*}"
+    if [[ ! "$major" =~ ^[0-9]+$ ]]; then
+        log_warn "No numeric VERSION_ID (${VERSION_CODENAME:-unknown}, probably testing/sid). Skipping version check."
+        return 0
+    fi
+    if [ "$major" -lt "$min" ]; then
+        log_error "$OS $VER is too old. Please use $([ "$OS" = "debian" ] && echo 11 || echo 20.04) or newer."
+        exit 1
+    fi
+}
+check_os_version
 
 # ---------- Install Git & Dependencies ----------
 log_info "Installing Git and dependencies..."
@@ -75,17 +107,22 @@ echo -e "${BOLD}======================================================${NC}"
 echo ""
 
 # Get GitHub username
-read -p "Enter your GitHub username: " github_user
+ask -p "Enter your GitHub username: " github_user
 
 # Get repository name
-read -p "Enter repository name (e.g., my-project): " repo_name
+ask -p "Enter repository name (e.g., my-project): " repo_name
+
+if [ -z "$github_user" ] || [ -z "$repo_name" ]; then
+    log_error "GitHub username and repository name cannot be empty."
+    exit 1
+fi
 
 # Get branch (default: main)
-read -p "Enter branch name (default: main): " branch_name
+ask -p "Enter branch name (default: main): " branch_name
 branch_name=${branch_name:-main}
 
 # Ask if repository is private
-read -p "Is the repository private? (y/n): " -n 1 -r
+ask -p "Is the repository private? (y/n): " -n 1
 echo ""
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     is_private=true
@@ -100,7 +137,7 @@ TARGET_DIR="/opt/$repo_name"
 
 if [ -d "$TARGET_DIR" ]; then
     log_warn "Directory $TARGET_DIR already exists."
-    read -p "Do you want to remove it and clone fresh? (y/n): " -n 1 -r
+    ask -p "Do you want to remove it and clone fresh? (y/n): " -n 1
     echo ""
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         rm -rf "$TARGET_DIR"
@@ -128,8 +165,15 @@ if [ "$is_private" = true ]; then
     echo "  4. Check 'repo' scope"
     echo "  5. Click 'Generate token' and copy it"
     echo ""
-    read -s -p "Enter your Personal Access Token: " github_token
+    echo "Tip: a fine-grained token with read-only 'Contents' access to this repo,"
+    echo "     or an SSH deploy key, is safer than a classic 'repo' token."
     echo ""
+    ask -s -p "Enter your Personal Access Token: " github_token
+    echo ""
+    if [ -z "$github_token" ]; then
+        log_error "Token cannot be empty for a private repository."
+        exit 1
+    fi
     
     # Use token in URL
     REPO_URL="https://${github_user}:${github_token}@github.com/${github_user}/${repo_name}.git"
@@ -141,6 +185,7 @@ else
 fi
 
 # Clone the repository
+CLEAN_URL="https://github.com/${github_user}/${repo_name}.git"
 echo ""
 log_info "Cloning from: $DISPLAY_URL"
 log_info "Target directory: $TARGET_DIR"
@@ -166,6 +211,29 @@ fi
 # ---------- Post-Clone Setup ----------
 cd "$TARGET_DIR"
 
+# ---------- Remove token from .git/config ----------
+if [ "$is_private" = true ]; then
+    git remote set-url origin "$CLEAN_URL"
+    log_success "Token removed from .git/config (remote is now $CLEAN_URL)."
+
+    echo ""
+    echo "For future 'git pull' on this private repo you can:"
+    echo "  - store the token in a root-only file (/root/.git-credentials-${repo_name}, chmod 600), or"
+    echo "  - use an SSH deploy key: https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys"
+    ask -p "Store the token for this repo in a root-only credentials file? (y/N): " -n 1
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        CRED_FILE="/root/.git-credentials-${repo_name}"
+        ( umask 077; printf 'https://%s:%s@github.com\n' "$github_user" "$github_token" > "$CRED_FILE" )
+        chmod 600 "$CRED_FILE"
+        git config credential.helper "store --file=$CRED_FILE"
+        log_success "Token stored in $CRED_FILE (mode 600) for this repo only."
+    else
+        log_info "Token not stored. You will be asked for credentials on 'git pull'."
+    fi
+fi
+unset github_token REPO_URL
+
 # Show repository info
 echo ""
 log_success "Repository cloned to: $TARGET_DIR"
@@ -179,7 +247,7 @@ echo "  - Latest commit: $(git log -1 --pretty=format:'%h - %s (%an, %ar)' 2>/de
 if [ -f "docker-compose.yml" ] || [ -f "compose.yml" ]; then
     echo ""
     log_info "Docker Compose file detected."
-    read -p "Do you want to start the project with Docker Compose? (y/n): " -n 1 -r
+    ask -p "Do you want to start the project with Docker Compose? (y/n): " -n 1
     echo ""
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         if command -v docker > /dev/null 2>&1; then

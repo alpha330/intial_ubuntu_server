@@ -9,7 +9,10 @@
 #  - Falls back to official Docker repos if mirrors fail
 #  - Falls back to Ubuntu/Debian default repos as last resort
 #  - Configure Iranian registry mirrors if selected
-#  - Idempotent: Safe to run multiple times
+#  - Verifies Docker's GPG key fingerprint (also for mirror-served keys)
+#  - Re-runnable: offers a "reconfigure only" mode when Docker is running;
+#    daemon.json is rewritten and Docker restarted ONLY if the config changed
+#  - Works with: curl ... | sudo bash  (prompts read from /dev/tty)
 # ======================================================
 
 # ---------- Colors ----------
@@ -30,6 +33,22 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 # NOTE: We intentionally do NOT use `set -e` here, because we want to
 # continue on non-fatal errors (e.g., one mirror failing) and try alternatives.
 
+# ---------- Interactive Input (works with curl | bash) ----------
+# All prompts read from the terminal (fd 3 -> /dev/tty), not from stdin,
+# so the script still works when it is piped into bash.
+if ! { exec 3</dev/tty; } 2>/dev/null; then
+    log_error "No terminal (TTY) available for interactive prompts."
+    log_error "Run this script from an interactive SSH session, e.g.:"
+    # shellcheck disable=SC2016
+    echo '  sudo bash -c "$(curl -fsSL <script-url>)"'
+    exit 1
+fi
+ask() { read -r -u 3 "$@"; }
+
+# Official Docker release signing key fingerprint
+# (https://docs.docker.com/engine/install/ubuntu/)
+DOCKER_GPG_FINGERPRINT="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
+
 # ---------- Check Root ----------
 if [ "$EUID" -ne 0 ]; then
   log_error "Please run as root (use sudo)."
@@ -38,6 +57,7 @@ fi
 
 # ---------- Detect OS ----------
 if [ -f /etc/os-release ]; then
+    # shellcheck disable=SC1091
     . /etc/os-release
     OS=$ID
     VER=$VERSION_ID
@@ -52,27 +72,29 @@ if [[ "$OS" != "ubuntu" && "$OS" != "debian" ]]; then
     exit 1
 fi
 
-log_success "Detected OS: $OS $VER ($CODENAME)"
+log_success "Detected OS: $OS ${VER:-?} ($CODENAME)"
 
-# Basic version check
-if [[ "$OS" == "ubuntu" ]]; then
-    # Ubuntu 20.04+
-    if [[ "${VER%%.*}" -lt 20 ]]; then
-        log_error "Ubuntu $VER is too old. Please use 20.04 or newer."
+# ---------- Version Check (Ubuntu 20.04+, Debian 11+) ----------
+# Debian testing/sid has no VERSION_ID: allow it with a warning.
+check_os_version() {
+    local min=20
+    [ "$OS" = "debian" ] && min=11
+    local major="${VER%%.*}"
+    if [[ ! "$major" =~ ^[0-9]+$ ]]; then
+        log_warn "No numeric VERSION_ID (${CODENAME:-unknown}, probably testing/sid). Skipping version check."
+        return 0
+    fi
+    if [ "$major" -lt "$min" ]; then
+        log_error "$OS $VER is too old. Please use $([ "$OS" = "debian" ] && echo 11 || echo 20.04) or newer."
         exit 1
     fi
-elif [[ "$OS" == "debian" ]]; then
-    # Debian 11+
-    if [[ "${VER%%.*}" -lt 11 ]]; then
-        log_error "Debian $VER is too old. Please use 11 or newer."
-        exit 1
-    fi
-fi
+}
+check_os_version
 
 # ---------- Check if Docker is already installed ----------
 if command -v docker > /dev/null 2>&1 && docker info > /dev/null 2>&1; then
     log_success "Docker is already installed and running."
-    read -p "Skip full reinstall and only reconfigure daemon.json? (recommended) [Y/n]: " -n 1 -r
+    ask -p "Skip full reinstall and only reconfigure daemon.json? (recommended) [Y/n]: " -n 1
     echo ""
     if [[ ! $REPLY =~ ^[Nn]$ ]]; then
         SKIP_INSTALL=true
@@ -96,7 +118,7 @@ echo ""
 echo "  1) Iran (use Iranian mirrors for faster & unrestricted access)"
 echo "  2) Global (use official Docker repositories)"
 echo ""
-read -p "Enter choice [1 or 2]: " LOCATION
+ask -p "Enter choice [1 or 2]: " LOCATION
 echo ""
 
 case $LOCATION in
@@ -133,9 +155,14 @@ fi
 
 # ---------- Helper: Fetch Docker GPG Key ----------
 # Tries official Docker key, then a list of Iranian mirrors.
+# A key is accepted ONLY if its fingerprint matches Docker's official key,
+# so a mirror cannot substitute its own signing key.
 fetch_docker_gpg_key() {
     local KEY_PATH="/etc/apt/keyrings/docker.gpg"
+    local TMP_KEY TMP_GNUPG FPRS
     install -m 0755 -d /etc/apt/keyrings
+    TMP_KEY=$(mktemp)
+    TMP_GNUPG=$(mktemp -d)
 
     local key_urls=(
         "https://download.docker.com/linux/${OS}/gpg"
@@ -147,16 +174,24 @@ fetch_docker_gpg_key() {
 
     for url in "${key_urls[@]}"; do
         log_info "Trying GPG key from: $url"
-        if curl -fsSL --max-time 15 "$url" 2>/dev/null | gpg --dearmor -o "$KEY_PATH" 2>/dev/null; then
-            if [ -s "$KEY_PATH" ]; then
-                chmod a+r "$KEY_PATH"
-                log_success "GPG key fetched from: $url"
+        rm -f "$TMP_KEY"
+        if curl -fsSL --max-time 15 "$url" 2>/dev/null | gpg --batch --yes --dearmor -o "$TMP_KEY" 2>/dev/null \
+            && [ -s "$TMP_KEY" ]; then
+            FPRS=$(gpg --homedir "$TMP_GNUPG" --batch --show-keys --with-colons "$TMP_KEY" 2>/dev/null \
+                | awk -F: '$1 == "fpr" {print $10}')
+            if echo "$FPRS" | grep -qx "$DOCKER_GPG_FINGERPRINT"; then
+                install -m 0644 "$TMP_KEY" "$KEY_PATH"
+                rm -rf "$TMP_KEY" "$TMP_GNUPG"
+                log_success "GPG key fetched from: $url (fingerprint verified)"
                 return 0
             fi
+            log_error "GPG key from $url does NOT match Docker's official fingerprint. Rejected."
+            continue
         fi
         log_warn "Failed to fetch GPG key from: $url"
     done
 
+    rm -rf "$TMP_KEY" "$TMP_GNUPG"
     return 1
 }
 
@@ -252,12 +287,18 @@ else
     INSTALL_METHOD=""
 
     # 1. Fetch GPG key (try official first, then mirrors)
+    GPG_OK=true
     if ! fetch_docker_gpg_key; then
-        log_error "Could not fetch Docker GPG key from any source."
-        log_warn "Will try distro default repositories as a last resort."
+        GPG_OK=false
+        log_error "Could not get a verified Docker GPG key from any source."
+        log_warn "Skipping docker-ce repositories (official and mirrors)."
+        log_warn "Will try distro default repositories (signed by $OS) as a last resort."
+        rm -f /etc/apt/sources.list.d/docker.list
     fi
 
-    if [ "$SERVER_LOCATION" = "global" ]; then
+    if [ "$GPG_OK" = false ]; then
+        :   # go straight to the distro fallback below
+    elif [ "$SERVER_LOCATION" = "global" ]; then
         # ---------- Global: Official Docker Repo ----------
         log_info "Installing Docker from official Docker repositories..."
 
@@ -325,7 +366,7 @@ else
         echo "  3. Manually inspect the docker.list file:"
         echo "     cat /etc/apt/sources.list.d/docker.list"
         echo "  4. Try running with Global option and a DNS shecan:"
-        echo "     bash <(curl -fsSL <this-script-url>)"
+        echo "     sudo bash -c \"\$(curl -fsSL <this-script-url>)\""
         echo ""
         exit 1
     fi
@@ -336,18 +377,13 @@ log_success "Docker install completed via: ${INSTALL_METHOD}"
 # ---------- Configure Docker Daemon (Mirrors & Log Rotation) ----------
 log_info "Configuring Docker daemon..."
 
-# Backup existing daemon.json if it exists
-if [ -f /etc/docker/daemon.json ]; then
-    cp /etc/docker/daemon.json /etc/docker/daemon.json.backup.$(date +%s)
-    log_info "Backed up existing daemon.json"
-fi
-
 mkdir -p /etc/docker
+NEW_DAEMON_JSON=$(mktemp)
 
-# Create daemon.json
+# Build the desired daemon.json in a temp file
 if [ "$SERVER_LOCATION" = "iran" ]; then
     # Iranian registry mirrors (popular and reliable ones)
-    cat > /etc/docker/daemon.json <<EOF
+    cat > "$NEW_DAEMON_JSON" <<EOF
 {
   "registry-mirrors": [
     "https://docker.iranserver.com",
@@ -362,10 +398,9 @@ if [ "$SERVER_LOCATION" = "iran" ]; then
   }
 }
 EOF
-    log_success "Configured Iranian Docker registry mirrors."
 else
     # Global: Only log rotation, no mirror needed
-    cat > /etc/docker/daemon.json <<EOF
+    cat > "$NEW_DAEMON_JSON" <<EOF
 {
   "log-driver": "json-file",
   "log-opts": {
@@ -374,15 +409,54 @@ else
   }
 }
 EOF
-    log_success "Configured Docker log rotation."
 fi
 
-# ---------- Restart Docker ----------
-log_info "Restarting Docker service..."
+DAEMON_CHANGED=false
+if [ -f /etc/docker/daemon.json ] && cmp -s "$NEW_DAEMON_JSON" /etc/docker/daemon.json; then
+    log_success "daemon.json is already up to date. Not touching it."
+    rm -f "$NEW_DAEMON_JSON"
+else
+    DAEMON_CHANGED=true
+    # Backup existing daemon.json if it exists
+    if [ -f /etc/docker/daemon.json ]; then
+        cp /etc/docker/daemon.json "/etc/docker/daemon.json.backup.$(date +%s)"
+        log_info "Backed up existing daemon.json"
+    fi
+    install -m 0644 "$NEW_DAEMON_JSON" /etc/docker/daemon.json
+    rm -f "$NEW_DAEMON_JSON"
+    if [ "$SERVER_LOCATION" = "iran" ]; then
+        log_success "Configured Iranian Docker registry mirrors + log rotation."
+    else
+        log_success "Configured Docker log rotation."
+    fi
+fi
+
+# ---------- Restart Docker (only if the config changed) ----------
 systemctl daemon-reload
 systemctl enable docker > /dev/null 2>&1
-systemctl restart docker || log_warn "Docker service restart returned non-zero (may still be OK)"
-sleep 2
+if [ "$DAEMON_CHANGED" = true ]; then
+    RUNNING_CONTAINERS=$(docker ps -q 2>/dev/null | wc -l)
+    if [ "$RUNNING_CONTAINERS" -gt 0 ]; then
+        log_warn "$RUNNING_CONTAINERS container(s) are running. Restarting Docker stops them;"
+        log_warn "containers without a restart policy (e.g. 'restart: unless-stopped') will stay stopped."
+        ask -p "Restart Docker now to apply daemon.json? [y/N]: " -n 1
+        echo ""
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            log_info "Restarting Docker service..."
+            systemctl restart docker || log_warn "Docker service restart returned non-zero (may still be OK)"
+            sleep 2
+        else
+            log_warn "Skipped restart. Apply later with: sudo systemctl restart docker"
+        fi
+    else
+        log_info "Restarting Docker service..."
+        systemctl restart docker || log_warn "Docker service restart returned non-zero (may still be OK)"
+        sleep 2
+    fi
+else
+    systemctl start docker > /dev/null 2>&1 || true
+    log_info "Docker configuration unchanged. No restart needed."
+fi
 
 # ---------- Verify Installation ----------
 log_info "Verifying installation..."
@@ -401,15 +475,12 @@ else
 fi
 
 # Check Compose — support both v2 plugin and v1 binary
-COMPOSE_OK=false
 COMPOSE_VER=""
 if docker compose version > /dev/null 2>&1; then
     COMPOSE_VER=$(docker compose version)
-    COMPOSE_OK=true
     log_success "Docker Compose (v2 plugin) installed: $COMPOSE_VER"
 elif command -v docker-compose > /dev/null 2>&1; then
     COMPOSE_VER=$(docker-compose --version)
-    COMPOSE_OK=true
     log_warn "Docker Compose v1 (legacy binary) detected: $COMPOSE_VER"
 else
     log_warn "Docker Compose not installed. You can install it later with:"
